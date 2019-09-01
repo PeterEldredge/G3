@@ -2,18 +2,23 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
+#include <unistd.h> 
+#include <sys/types.h> 
+#include <string.h> 
+#include <sys/wait.h> 
+#include <signal.h>
 
-const char HOST_PIECE = 'X';
-const char CLIENT_PIECE = 'O';
+const char PARENT_PIECE = 'X';
+const char CHILD_PIECE = 'O';
 const char EMPTY_PIECE = ' ';
 
-const int HOST_INT = 1;
-const int CLIENT_INT = 0;
+const int PARENT_INT = 1;
+const int CHILD_INT = 0;
 const int EMPTY_INT = -1;
 
 const int BOARD_FULL = 2;
-const int HOST_WON = 1;
-const int CLIENT_WON = 0;
+const int PARENT_WON = 1;
+const int CHILD_WON = 0;
 
 struct GameData
 {
@@ -21,7 +26,15 @@ struct GameData
     int dimensions;
     int column;
     int row;
-    bool hostTurn;
+    int gameNumber;
+    bool parentTurn;
+};
+
+struct ForkData
+{
+    pid_t pid;
+    int* parentFD;
+    int* childFD;
 };
 
 struct Point 
@@ -106,11 +119,11 @@ void printBoard(struct GameData* gameData)
             }
             else if(gameData->board[j][i] == 0)
             {
-                printf("%c", CLIENT_PIECE);
+                printf("%c", CHILD_PIECE);
             }
             else
             {
-                printf("%c", HOST_PIECE);
+                printf("%c", PARENT_PIECE);
             }
 
             printf("|");
@@ -119,6 +132,8 @@ void printBoard(struct GameData* gameData)
         printf("\n");
         j = 0;
     }
+
+    printf("------------------------------------\n");
 }
 
 // Returns the open spot in the designated column, if the column is full returns -1
@@ -166,7 +181,7 @@ int checkLine(struct GameData* gameData, struct Point direction)
     struct Point startingPoint = newPoint(gameData->column, gameData->row);
     struct Point currentPoint = startingPoint;
 
-    int piece = gameData->hostTurn ? HOST_INT : CLIENT_INT;
+    int piece = gameData->parentTurn ? PARENT_INT : CHILD_INT;
     int counter = -1; // Set to -1 because starting point gets counted twice
 
     while((getPoint(gameData->board, currentPoint) == piece))
@@ -229,7 +244,7 @@ int checkGameOver(struct GameData* gameData)
 
     if(checkGameWon(gameData))
     {
-        return gameData->hostTurn ? HOST_WON : CLIENT_WON;
+        return gameData->parentTurn ? PARENT_WON : CHILD_WON;
     }
 
     if(checkBoardFull(gameData))
@@ -242,7 +257,7 @@ int checkGameOver(struct GameData* gameData)
 
 // Checks to see if a piece is being placed in a valid column,
 // if so, places piece
-int placePiece(int** board, int dimensions, int column, bool hostTurn)
+int placePiece(int** board, int dimensions, int column, bool parentTurn)
 {
     // printf("PlacePiece\n");
 
@@ -254,59 +269,103 @@ int placePiece(int** board, int dimensions, int column, bool hostTurn)
         return -1;
     }
 
-    if(hostTurn)
+    if(parentTurn)
     {
-        board[column][row] = HOST_INT;
+        board[column][row] = PARENT_INT;
     }
     else
     {
-        board[column][row] = CLIENT_INT;
+        board[column][row] = CHILD_INT;
     }
 
     return row;
 }
 
 // Places pieces until the game is over
-void gameLoop(struct GameData* gameData)
+void gameLoop(struct GameData* gameData, struct ForkData* forkData)
 {
     // printf("GameLoop\n");
-
-    int gameState = -1;
     
-    srand(time(0));
+    int gameState = -1;
+    int readFD;
+    int writeFD;
+
+    int* recievedMove = (int*)malloc(sizeof(int));
+    int* move = (int*)malloc(sizeof(int));
+
+    if(forkData->pid == 0)
+    {   
+        readFD = forkData->parentFD[0];
+        writeFD = forkData->childFD[1];
+    }
+    else
+    {   
+        readFD = forkData->childFD[0];
+        writeFD = forkData->parentFD[1];
+    }
 
     while(gameState < 0)
     {
-        gameData->column = rand() % gameData->dimensions;
-        gameData->row = placePiece(gameData->board, gameData->dimensions, gameData->column, gameData->hostTurn);
-
-        if(gameData->row >= 0)
+        if((gameData->parentTurn && (forkData->pid == 0)) || (!gameData->parentTurn && (forkData->pid == 1)))
         {
-            gameState = checkGameOver(gameData);
-            gameData->hostTurn = !gameData->hostTurn;
+            read(readFD, recievedMove, sizeof(recievedMove));
+
+            gameData->column = *recievedMove;
+            gameData->row = placePiece(gameData->board, gameData->dimensions, gameData->column, gameData->parentTurn);
+
+            if(gameData->row >= 0)
+            {
+                gameState = checkGameOver(gameData);
+            }
+
+            gameData->parentTurn = !gameData->parentTurn;
+        }
+        else
+        {
+            gameData->column = rand() % gameData->dimensions;
+            gameData->row = placePiece(gameData->board, gameData->dimensions, gameData->column, gameData->parentTurn);
+
+            if(gameData->row >= 0)
+            {
+                write(writeFD, move, sizeof(move));
+                gameState = checkGameOver(gameData);
+
+                gameData->parentTurn = !gameData->parentTurn;
+            }
         }
     }
 
-    if(gameState == HOST_WON)
+    close(forkData->parentFD[0]);
+    close(forkData->parentFD[1]);
+    close(forkData->childFD[0]);
+    close(forkData->childFD[1]);
+
+    if(forkData->pid == 0)
     {
-        printf("The HOST won!\n");
+        exit(0);
     }
-    else if(gameState == CLIENT_WON)
+
+    if(gameState == PARENT_WON)
     {
-        printf("The CLIENT won!\n");
+        printf("Game %i: The PARENT won!\n", gameData->gameNumber);
+    }
+    else if(gameState == CHILD_WON)
+    {
+        printf("Game %i: The CHILD won!\n", gameData->gameNumber);
     }
     else if(gameState == BOARD_FULL)
     {
-        printf("The game ended in a DRAW!\n");
+        printf("Game %i: Ended in a DRAW!\n", gameData->gameNumber);
     }
 }
 
 // Sets Up GameData and starts the game loop
-void initializeGame(int dimensions)
+void initializeGame(int dimensions, int gameNumber, int* parentFD, int* childFD)
 {
     // printf("InitializeGame\n");
 
     struct GameData* gameData = (struct GameData*)malloc(sizeof(struct GameData));
+    struct ForkData* forkData = (struct ForkData*)malloc(sizeof(struct ForkData));
 
     int i = 0;
     int j = 0;
@@ -315,7 +374,8 @@ void initializeGame(int dimensions)
     gameData->dimensions = dimensions;
     gameData->column = 0;
     gameData->row = 0;
-    gameData->hostTurn = true;
+    gameData->gameNumber = gameNumber;
+    gameData->parentTurn = true;
     
     for(i; i < gameData->dimensions; i++)
     {
@@ -329,14 +389,44 @@ void initializeGame(int dimensions)
         j = 0;
     }
 
-    gameLoop(gameData);
+    pipe(parentFD);
+    pipe(childFD);
+    
+    forkData->parentFD = parentFD;
+    forkData->childFD = childFD;
+    forkData->pid = fork();
+
+    gameLoop(gameData, forkData);
     printBoard(gameData);
+}
+
+int** generateFDArray(int games)
+{
+    // printf("GenerateFDArray\n");
+
+    int i = 0;
+    int** array;
+
+    array = (int**)malloc(games * sizeof(int*));
+
+    for(i; i < games; i++)
+    {
+        array[i] = (int*)malloc(2 * sizeof(int));
+    }
+
+    return array;
 }
 
 int main(int argc, const char* argv[])
 {
     int games;
     int dimensions;
+
+    int i = 0;
+
+    pid_t* pids;
+    int** parentFDs;
+    int** childFDs;
 
     if(argc != 3)
     {
@@ -347,7 +437,18 @@ int main(int argc, const char* argv[])
     games = atoi(argv[1]);
     dimensions = atoi(argv[2]);
 
-    initializeGame(dimensions);
+    pids = (pid_t*)malloc(games * sizeof(pid_t));
+    
+    parentFDs = generateFDArray(games);
+    childFDs = generateFDArray(games);
+
+    printf("------------------------------------\n");
+
+    for(i; i < games; i++)
+    {
+        srand(i * time(0));
+        initializeGame(dimensions, i + 1, parentFDs[i], childFDs[i]);
+    }
 
     return 0;
 }
